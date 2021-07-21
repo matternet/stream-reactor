@@ -24,9 +24,12 @@ import com.datamountaineer.streamreactor.connect.mqtt.config.MqttSinkSettings
 import com.datamountaineer.streamreactor.connect.mqtt.connection.MqttClientConnectionFn
 import com.typesafe.scalalogging.StrictLogging
 import org.apache.kafka.connect.sink.SinkRecord
+import com.fasterxml.jackson.databind.JsonNode
+import org.apache.kafka.connect.data.Schema
 import org.eclipse.paho.client.mqttv3.{MqttClient, MqttMessage}
 import org.json4s.DefaultFormats
 import org.json4s.native.JsonMethods._
+import java.nio.ByteBuffer
 
 import scala.collection.JavaConverters._
 import scala.util.Try
@@ -54,6 +57,7 @@ class MqttWriter(client: MqttClient, settings: MqttSinkSettings,
   val msg = new MqttMessage()
   msg.setQos(settings.mqttQualityOfService)
   var mqttTarget : String = ""
+  var transformed : JsonNode = null
 
   def write(records: Set[SinkRecord]) = {
 
@@ -66,16 +70,33 @@ class MqttWriter(client: MqttClient, settings: MqttSinkSettings,
         kcqls.map(k => {
           //for all the records in the group transform
           records.map(r => {
-            val transformed = ToJsonWithProjections(
-              k.getFields.asScala.map(FieldConverter.apply),
-              k.getIgnoredFields.asScala.map(FieldConverter.apply),
-              r.valueSchema(),
-              r.value(),
-              k.hasRetainStructure
-            )
+            val converter = convertersMap.getOrElse(k.getSource, null)
+            var valueSchema: Schema = null
+            var value: Array[Byte] = null
+            // Perform this check first to determine if the value schema is bytes
+            if (converter != null) {
+              val converted_record = converter.convert(mqttTarget, r)
+              valueSchema = converted_record.valueSchema()
+              value = converted_record.value().asInstanceOf[Array[Byte]]
+            }
+
+            // Only transform to Json if the value schema isn't bytes
+            if (valueSchema != Schema.BYTES_SCHEMA) {
+              transformed = ToJsonWithProjections(
+                k.getFields.asScala.map(FieldConverter.apply),
+                k.getIgnoredFields.asScala.map(FieldConverter.apply),
+                r.valueSchema(),
+                r.value(),
+                k.hasRetainStructure
+              )
+            }
+
+            if (converter == null) {
+              value = transformed.toString.getBytes()
+            }
 
             //get kafka message key if asked for
-            if (Option(k.getDynamicTarget).getOrElse("").nonEmpty) {
+            if (valueSchema != Schema.BYTES_SCHEMA && Option(k.getDynamicTarget).getOrElse("").nonEmpty) {
               var mqtttopic = (parse(transformed.toString) \ k.getDynamicTarget).extractOrElse[String](null)
               if (mqtttopic.nonEmpty) {
                 mqttTarget = mqtttopic
@@ -84,14 +105,6 @@ class MqttWriter(client: MqttClient, settings: MqttSinkSettings,
               mqttTarget = r.key().toString()
             } else {
               mqttTarget = k.getTarget
-            }
-
-            val converter = convertersMap.getOrElse(k.getSource, null)
-            val value = if (converter == null) {
-              transformed.toString.getBytes()
-            } else {
-              val converted_record = converter.convert(mqttTarget, r)
-              converted_record.value().asInstanceOf[Array[Byte]]
             }
 
             (mqttTarget, value)
