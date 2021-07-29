@@ -16,7 +16,7 @@
 
 package com.datamountaineer.streamreactor.connect.mqtt.sink
 
-import com.datamountaineer.streamreactor.common.converters.sink.Converter
+import com.datamountaineer.streamreactor.common.converters.sink.{BytesConverter, Converter}
 import com.datamountaineer.streamreactor.connect.mqtt.MqttTestContainer
 import com.datamountaineer.streamreactor.connect.mqtt.config.{MqttConfigConstants, MqttSinkConfig, MqttSinkSettings}
 import com.typesafe.scalalogging.StrictLogging
@@ -133,6 +133,20 @@ class TestMqttWriter extends MqttTestContainer with MqttCallback with StrictLogg
     }).toSet
   }
 
+  //generate some test byte array records
+  def getTestByteArrayRecords: Set[SinkRecord] = {
+    val assignment: mutable.Set[TopicPartition] = getAssignment.asScala
+
+    assignment.flatMap(a => {
+      (1 to 1).map(i => {
+        val byteArray = "bytes".getBytes
+        val record = ByteBuffer.wrap(byteArray)
+        logger.info(s"Bytes: $byteArray, Record: $record")
+        new SinkRecord(a.topic(), a.partition(), Schema.STRING_SCHEMA, "key", Schema.BYTES_SCHEMA, byteArray, i, System.currentTimeMillis(), TimestampType.CREATE_TIME)
+      })
+    }).toSet
+  }
+
   // create a avro record of the test data
   def createAvroRecord(avro_schema_file: String): Array[Byte] = {
 
@@ -166,6 +180,54 @@ class TestMqttWriter extends MqttTestContainer with MqttCallback with StrictLogg
   //get the assignment of topic partitions for the sinkTask
   def getAssignment: util.Set[TopicPartition] = {
     ASSIGNMENT
+  }
+
+  "writer should write bytes with byte array converter" in {
+    val props = Map(
+      MqttConfigConstants.HOSTS_CONFIG -> getMqttConnectionUrl,
+      MqttConfigConstants.KCQL_CONFIG -> s"INSERT INTO $TARGET SELECT * FROM $TOPIC WITHCONVERTER=`${classOf[BytesConverter].getCanonicalName}`;INSERT INTO $TARGET SELECT * FROM $TOPIC2 WITHCONVERTER=`${classOf[BytesConverter].getCanonicalName}`",
+      MqttConfigConstants.QS_CONFIG -> "1",
+      MqttConfigConstants.CLEAN_SESSION_CONFIG -> "true",
+      MqttConfigConstants.CLIENT_ID_CONFIG -> UUID.randomUUID().toString,
+      MqttConfigConstants.CONNECTION_TIMEOUT_CONFIG -> "1000",
+      MqttConfigConstants.KEEP_ALIVE_INTERVAL_CONFIG -> "1000",
+      MqttConfigConstants.PASSWORD_CONFIG -> mqttPassword,
+      MqttConfigConstants.USER_CONFIG -> mqttUser
+    )
+
+    val config = MqttSinkConfig(props.asJava)
+    val settings = MqttSinkSettings(config)
+
+    val convertersMap = settings.sinksToConverters.map { case (topic, clazz) =>
+        logger.info(s"Creating converter instance for $clazz and $topic")
+        if (clazz == null) {
+          topic -> null
+        } else {
+          val converter = Try(Class.forName(clazz).newInstance()) match {
+            case Success(value) => value.asInstanceOf[Converter]
+            case Failure(_) => throw new ConfigException(s"Invalid ${MqttConfigConstants.KCQL_CONFIG} is invalid. $clazz should have an empty ctor!")
+          }
+          converter.initialize(props)
+          topic -> converter
+        }
+      }
+
+    val writer = MqttWriter(settings, convertersMap)
+    val records = getTestByteArrayRecords
+
+    withSubscribedMqttClient {
+      writer.write(records)
+      Thread.sleep(2000)
+
+      queue.size() shouldBe 3
+      val message = queue.asScala.take(1).head.getPayload
+      queue.clear()
+      logger.info(s"Message: $message")
+      message shouldBe a [Array[Byte]]
+      val stringMessage = new String(message) 
+      stringMessage shouldBe "bytes"
+      writer.close
+    }
   }
 
   "writer should writer all fields" in {
