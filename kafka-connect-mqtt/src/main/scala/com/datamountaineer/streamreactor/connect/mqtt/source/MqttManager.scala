@@ -50,7 +50,7 @@ class MqttManager(connectionFn: MqttSourceSettings => MqttConnectOptions,
   logger.info(s"Connected to ${settings.connection} as ${settings.clientId}")
 
   override def close(): Unit = {
-    client.disconnect(5000)
+    client.disconnectForcibly(5000, 5000, false)
     client.close()
   }
 
