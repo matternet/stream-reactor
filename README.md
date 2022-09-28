@@ -64,7 +64,7 @@ The following connectors will be deprecated and no longer included in any releas
 
 ## Release Notes
 
-**2.3.0**
+**2.2.1**
 
 SUP-2411: Fix issue with MQTT connectors not properly shutting down.
 
