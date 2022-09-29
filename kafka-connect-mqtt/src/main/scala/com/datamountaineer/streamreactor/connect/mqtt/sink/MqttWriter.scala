@@ -129,7 +129,7 @@ class MqttWriter(client: MqttClient, settings: MqttSinkSettings,
   def flush = {}
 
   def close = {
-    client.disconnect()
+    client.disconnectForcibly(5000, 5000, false)
     client.close()
   }
 }
